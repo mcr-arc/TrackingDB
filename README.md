@@ -34,7 +34,7 @@ Windows (Credential Manager)
 Running the pipeline
 Run from the repository root:
 
-python toGit.py
+## python main.py
 
 
 Email (optional)
