@@ -3,7 +3,7 @@ Automation Pipeline for Tracking DB for high/low volume submissions
 
 ## Configuration
 
-# `.env` file (required)
+`.env` file (required)
 This project reads configuration from a local `.env` file. 
 
 Password management with Keyring (required)
