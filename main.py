@@ -19,6 +19,9 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
 import smtplib
 
+#Check these:
+## resolve_bundle_id() => should .bun be included?
+
 
 # ----------------------------- Status Codes -----------------------------
 STATUS_SUCCESS = 0
@@ -100,7 +103,7 @@ class AppConfig:
             smtp_host=os.getenv("SMTP_HOST", "smtpinternal.missouri.edu"),
             smtp_port=int(os.getenv("SMTP_PORT", "25")),
             email_from=os.getenv("EMAIL_FROM", "mcr-noreply@missouri.edu"),
-            email_cc=[x.strip() for x in os.getenv("EMAIL_CC", "").split(",") if x.strip()],
+            email_cc= os.getenv("EMAIL_CC", "") or ["jainn@health.missouri.edu", "stulgos@health.missouri.edu", "lahf5p@health.missouri.edu"],
             email_fallback_to=os.getenv("EMAIL_FALLBACK_TO", "stulgos@health.missouri.edu"),
         )
 
@@ -186,6 +189,20 @@ class TrackingRepo:
         with self.engine_test.connect() as c:
             rows = c.execute(sql, {"n": max_rows}).fetchall()
         return [r[0] for r in rows]
+
+    def update_total_tumor_count(self, electronic_file: str, tumor_count: Optional[int]) -> None:
+        if tumor_count is None:
+            return
+
+        with self.engine_test.begin() as conn:
+            conn.execute(
+                text("""
+                    UPDATE dbo.Database_of_XML
+                    SET Total_Tumor_Count = :tumor_count
+                    WHERE Electronic_File = :electronic_file
+                """),
+                {"tumor_count": tumor_count, "electronic_file": electronic_file},
+            )
 
     def upsert_process_status(self, electronic_file: str, status: int, err_msg: Optional[str]) -> None:
         sql_update = text("""
@@ -318,18 +335,22 @@ class MappingRepo:
         self.engine_prod = engine_prod
 
     def ods_assignment(self) -> Dict[int, str]:
-        df = pd.read_sql(text("SELECT ODS, Hospital, FIN FROM MCRTracking.dbo.ODS_Assignment"), self.engine_test.connect())
+        with self.engine_test.connect() as c:
+            df = pd.read_sql(text("SELECT ODS, Hospital, FIN FROM MCRTracking.dbo.ODS_Assignment"), c)
         df["Hospital"] = df["Hospital"].astype(str).str.strip()
         return df.set_index("FIN")["ODS"].to_dict()
 
     def email_assignment(self) -> Dict[str, str]:
-        df = pd.read_sql(text("SELECT * FROM MCRTracking.dbo.Email_Assignment"), self.engine_test.connect())
+        with self.engine_test.connect() as c:
+            df = pd.read_sql(text("SELECT * FROM MCRTracking.dbo.Email_Assignment"), c)
         df["ODS"] = df["ODS"].astype(str).str.strip()
         df["Email"] = df["Email"].astype(str).str.strip()
         return df.set_index("ODS")["Email"].to_dict()
 
     def source_map(self) -> Dict[int, str]:
-        df = pd.read_sql(text("SELECT Label, Value FROM prostate.dbo.UserFacilities"), self.engine_prod.connect())
+        with self.engine_prod.connect() as c:
+            df = pd.read_sql(text("SELECT Label, Value FROM prostate.dbo.UserFacilities"), c)
+
         df["Label"] = df["Label"].astype(str).str.strip()
         df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
         df = df.dropna(subset=["Value"])
@@ -493,10 +514,11 @@ class XMLProcessor:
     def tumor_count(self, cleaned_xml: str) -> Optional[int]:
         try:
             root = etree.fromstring(cleaned_xml.encode("utf-8"))
-            return int(root.xpath("count(//n:Patient//n:Tumor)", namespaces=self.NS))
+            tumor_count = int(root.xpath("count(//n:Patient//n:Tumor)", namespaces=self.NS))
+            return tumor_count
         except Exception:
             return None
-
+        
 
 # ----------------------------- Low/Mid File Copier -----------------------------
 class LowMidCollector:
@@ -555,21 +577,75 @@ class LowMidCollector:
 
 # ----------------------------- Email -----------------------------
 class EmailNotifier:
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, logger) -> None:
         self.cfg = cfg
-
-    def send_assignment(self, to_addr: str, subject: str, body: str) -> None:
+        self.logger = logger
+    
+    def _send(self, to_addr: str, subject: str, body: str, cc: Optional[List[str]] = None) -> None:
         email = EmailMessage()
         email["From"] = self.cfg.email_from
         email["To"] = to_addr
-        if self.cfg.email_cc:
-            email["Cc"] = self.cfg.email_cc
+        if cc:
+            email["Cc"] = ", ".join(cc)  
         email["Subject"] = subject
         email.set_content(body)
+        try:
+            with smtplib.SMTP(self.cfg.smtp_host, port=self.cfg.smtp_port) as smtp:
+                smtp.send_message(email)
+        except Exception as e:
+            self.logger.exception("Failed to send email: %s", e)
 
-        with smtplib.SMTP(self.cfg.smtp_host, port=self.cfg.smtp_port) as smtp:
-            smtp.send_message(email)
 
+
+    def send_assignment(self, to_addr: str, subject: str, body: str) -> None:
+        self._send(
+            to_addr=to_addr,
+            subject=subject,
+            body=body,
+            cc=self.cfg.email_cc
+        )
+    
+
+    def invalid_non_hospital_error(self) -> None:
+        subject = "Unexpected error processing the low-mid volume files"
+        body = (
+            "Hey, there was an unexpected error while reading the low/mid volume files from the source and putting them into destination."
+            "\n\nRegards,\nMCR Tracker"
+        )
+        self._send(
+            to_addr="stulgos@health.missouri.edu",
+            subject=subject,
+            body=body,
+            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+        )
+
+    def send_missing_ods_email(self, data_fno: str, fin: str, ods: str) -> None:
+        subject = f"ERROR IN File: {data_fno}"
+        body = (
+            f"Hey,\n\nThe FIN NUMBER: {fin} does not match with any ODS for the record {data_fno}."
+            f"Metadata: File: {data_fno}\n FIN Number: {fin}\n Recordeed ODS: {ods}"
+            f"\n\nRegards,\nMCR Tracker"
+        )
+        self._send(
+            to_addr="stulgos@health.missouri.edu",
+            subject=subject,
+            body=body,
+            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+        )
+
+    def warn_finno_mismatch(self, data_fno: str, data_finno: int, webplus_facilityID: int) -> None:
+        subject = f"Mismatch for the electronic file: {data_fno}; mismatch in FIN number"
+        body = (
+            f"Hey,\n\nThe FIN Number assigned for the elctronic file-{data_fno} in the Webplus database is {webplus_facilityID}."
+            f"However, the FIN number in {data_fno}.xml xml file is-{data_finno}. Continuing the process with {webplus_facilityID} as file number"
+            f"\n\nRegards,\nMCR Tracker"
+        )
+        self._send(
+            to_addr="stulgos@health.missouri.edu",
+            subject=subject,
+            body=body,
+            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+        )
 
 # ----------------------------- Pipeline -----------------------------
 class MCRPipeline:
@@ -589,7 +665,7 @@ class MCRPipeline:
         self.crs = CRSRepo(self.eng_crs)
         self.xmlp = XMLProcessor(cfg)
         self.lowmid = LowMidCollector(cfg)
-        self.emailer = EmailNotifier(cfg)
+        self.emailer = EmailNotifier(cfg, logger)
 
         self.ods_assignment = self.mappings.ods_assignment()
         self.email_assignment = self.mappings.email_assignment()
@@ -603,9 +679,11 @@ class MCRPipeline:
         raw_xml = str(data[0])
         cleaned = self.xmlp.parse_xml(raw_xml)
         if cleaned is None:
+            self.tracking.upsert_process_status(bundle_id, STATUS_XML_INVALID, "XML parsing failed")
             return None, None, None
 
         tumor_count = self.xmlp.tumor_count(cleaned)
+        self.tracking.update_total_tumor_count(bundle_id, tumor_count)
 
         # write high-volume output
         os.makedirs(self.cfg.high_volume_out_dir, exist_ok=True)
@@ -628,9 +706,12 @@ class MCRPipeline:
 
         cleaned = self.xmlp.parse_xml(raw_xml)
         if cleaned is None:
+            self.tracking.upsert_process_status(bundle_filename.replace(".xml",""), STATUS_XML_INVALID, "XML parsing failed")
             return None, None, None
 
         tumor_count = self.xmlp.tumor_count(cleaned)
+        ef = bundle_filename[:-4] if bundle_filename.lower().endswith(".xml") else bundle_filename
+        self.tracking.update_total_tumor_count(ef, tumor_count)
         bs = BeautifulSoup(raw_xml, "xml")
         return bs.find_all("Patient"), tumor_count, cleaned
 
@@ -660,6 +741,16 @@ class MCRPipeline:
         except Exception:
             fin = 0
 
+        try:
+            if df_webplus is not None and not df_webplus.empty and (df_webplus['BundleID'] == bundle_id).any():
+                webplus_finno:int = int(df_webplus.loc[df_webplus['BundleID'] == bundle_id, 'FacilityID'].iloc[0])
+            else:
+                webplus_finno = fin
+        except Exception:
+            webplus_finno:int = fin
+
+        if webplus_finno!=fin:
+            self.emailer.warn_finno_mismatch(os.path.splitext(bundle_id)[0], fin, webplus_finno)
         # Year buckets
         data_per_year: Dict[int, int] = {}
         for record in patients:
@@ -671,14 +762,6 @@ class MCRPipeline:
             except Exception:
                 dod = 0
 
-            try:
-                doc_raw = tumor_attr.find("Item", attrs={"naaccrId": "dateOf1stContact"}).text
-                doc = int(doc_raw[:4]) if len(doc_raw) >= 4 else 9999
-            except Exception:
-                doc = 9999
-
-            if dod < doc or doc == 9999 or dod < 2000:
-                dod = 0
 
             data_per_year[dod] = data_per_year.get(dod, 0) + 1
 
@@ -725,39 +808,33 @@ class MCRPipeline:
                 lowmid_ids.add(new_name.replace(".xml", ""))  # store base
 
         all_ids = list(bundle_ids or []) + list(lowmid_ids or [])
-        self.logger.info("Processing total bundles: %d (high=%d, lowmid=%d)", len(all_ids), len(bundle_ids or []), len(lowmid_ids or []))
 
         for bundle_id in all_ids:
-            self.logger.info("[%s] (%d/%d) START bundle=%s", len(all_ids), bundle_id)
             try:
                 row, err = self._extract_bundle(bundle_id, df_webplus)
                 if row is None:
-                    self.logger.warning("bundle=%s FAILED extract: %s", bundle_id, err)
                     self.tracking.upsert_process_status(bundle_id, STATUS_XML_INVALID, err or "Extraction failed")
                     continue
 
                 self.tracking.insert_if_missing(row)
-
                 self.tracking.upsert_process_status(bundle_id, STATUS_SUCCESS, None)
-                self.logger.info("bundle=%s status=SUCCESS", bundle_id)
 
-                # Optional email
+                
                 if self.cfg.email_enabled:
                     fin = row.get("FIN_NUMBER", 0)
                     ods = row.get("Assigned_ODS", None)
 
                     if fin in (None, 0):
-                        self.logger.warning("bundle=%s email skipped: FIN missing/invalid", bundle_id)
                         self.tracking.upsert_process_status(bundle_id, STATUS_FIN_INVALID, "FIN missing/invalid")
+                        self.emailer.send_missing_ods_email(bundle_id, fin, ods)
                         continue
                     if ods is None or (isinstance(ods, float) and np.isnan(ods)):
-                        self.logger.warning("bundle=%s email skipped: ODS missing for FIN %s", bundle_id, fin)
-
                         self.tracking.upsert_process_status(bundle_id, STATUS_ODS_MISSING, f"ODS missing for FIN {fin}")
+                        self.emailer.send_missing_ods_email(bundle_id, fin, ods)
                         continue
                     if str(ods) not in self.email_assignment:
-                        self.logger.warning("bundle=%s email skipped: no email mapping for ODS=%s", bundle_id, str(ods))
                         self.tracking.upsert_process_status(bundle_id, STATUS_ODS_MISSING, f"No email mapping for ODS '{ods}' (FIN {fin})")
+                        self.emailer.send_missing_ods_email(bundle_id, fin, ods)
                         continue
 
                     # You can change what you show in email here:
@@ -772,7 +849,6 @@ class MCRPipeline:
                         f"Regards,\nMCR Tracker"
                     )
                     self.emailer.send_assignment(self.email_assignment[str(ods)], subject, body)
-                    self.logger.info("bundle=%s EMAIL SENT to=%s", bundle_id, self.email_assignment[str(ods)])
 
             except Exception as e:
                 self.tracking.upsert_process_status(bundle_id, STATUS_UNKNOWN_ERROR, f"Unhandled: {e}")
@@ -799,14 +875,18 @@ class MCRPipeline:
                 base = ef[:-4] if ef.lower().endswith(".xml") else ef
                 retry_bases.add(base)
 
-            self.logger.info("Retry high-volume bases: %d", len(retry_bases))
             df_retry = self.webplus.fetch_retry_payloads(retry_bases)
-
             self.process_files(df_retry, retry_bases, lowmid_renamed=[])
 
         # Low/mid copy step
-        renamed, _ = self.lowmid.scan_and_copy(dry_run=False)
-        self.logger.info("Low/mid renamed copied: %d", len(renamed))
+        try:
+            renamed, _ = self.lowmid.scan_and_copy(dry_run=False)
+            self.logger.info("Low/mid renamed copied: %d", len(renamed))
+        except Exception as e:
+            self.logger.exception("Low/mid copy failed: %s", e)
+            if self.cfg.email_enabled:
+                self.emailer.invalid_non_hospital_error()
+            renamed = []
 
         # New submissions
         last_run_id = self.tracking.get_last_run_id()
