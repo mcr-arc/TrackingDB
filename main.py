@@ -100,11 +100,11 @@ class AppConfig:
             lowmid_dest_dir=must("LOWMID_DEST_DIR"),
 
             email_enabled=email_enabled,
-            smtp_host=os.getenv("SMTP_HOST", "smtpinternal.missouri.edu"),
-            smtp_port=int(os.getenv("SMTP_PORT", "25")),
-            email_from=os.getenv("EMAIL_FROM", "mcr-noreply@missouri.edu"),
-            email_cc= os.getenv("EMAIL_CC", "") or ["jainn@health.missouri.edu", "stulgos@health.missouri.edu", "lahf5p@health.missouri.edu"],
-            email_fallback_to=os.getenv("EMAIL_FALLBACK_TO", "stulgos@health.missouri.edu"),
+            smtp_host=os.getenv("SMTP_HOST", "your_host"),
+            smtp_port=int(os.getenv("SMTP_PORT", "port")),
+            email_from=os.getenv("EMAIL_FROM", "your_email"),
+            email_cc= os.getenv("EMAIL_CC", ""),
+            email_fallback_to=os.getenv("EMAIL_FALLBACK_TO", "fallback_person@some_domain.com"),
         )
 
 
@@ -616,7 +616,7 @@ class EmailNotifier:
             to_addr="stulgos@health.missouri.edu",
             subject=subject,
             body=body,
-            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+            cc=self.cfg.email_cc,
         )
 
     def send_missing_ods_email(self, data_fno: str, fin: str, ods: str) -> None:
@@ -630,7 +630,7 @@ class EmailNotifier:
             to_addr="stulgos@health.missouri.edu",
             subject=subject,
             body=body,
-            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+            cc=self.cfg.email_cc,
         )
 
     def warn_finno_mismatch(self, data_fno: str, data_finno: int, webplus_facilityID: int) -> None:
@@ -644,7 +644,7 @@ class EmailNotifier:
             to_addr="stulgos@health.missouri.edu",
             subject=subject,
             body=body,
-            cc=self.cfg.email_cc or ["lahf5p@health.missouri.edu", "jainn@health.missouri.edu"],
+            cc=self.cfg.email_cc,
         )
 
 # ----------------------------- Pipeline -----------------------------
