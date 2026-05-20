@@ -465,25 +465,31 @@ class CRSRepo:
         pattern_slash = f"%/P{converted}.xml"
 
         query = text("""
-            SELECT TOP 1 ImportID, DateImported, AbsImported, Message
+            SELECT TOP 1 *
             FROM PCRegistryMCR.dbo.ImportLog
             WHERE FileName LIKE :pattern_backslash OR FileName LIKE :pattern_slash
             ORDER BY DateImported DESC
         """)
 
         with self.engine_crs.connect() as c:
-            row = c.execute(query, {"pattern_backslash": pattern_backslash, "pattern_slash": pattern_slash}).fetchone()
+            row = c.execute(query, {"pattern_backslash": pattern_backslash, "pattern_slash": pattern_slash}).mappings().fetchone()
 
         if not row:
             return None
 
         msg = (row.Message or "").strip().lower()
+        pending_cols = [ "PendingTumorLinkage", "PendingConsolidation", "PendingTumorSequence", "PendingPatientLinkage", "PendingDuplicate", "PendingEdit",
+                        "PendingTumorSequence_newtumor", "PendingCS", "PendingMType", "PendingTNM", "PendingTNMStageGroupCompare", "Suspense"]
+
         return {
             "updated": 1 if "import complete" in msg else 0,
             "importID": row.ImportID,
             "importedCases": row.AbsImported,
             "dateImported": row.DateImported,
             "prepPlusBundle": converted,
+            "newCaseCount": row.NewCaseCount,
+            "disposedAtImport": row.DisposedAtImport,
+            "totalPendingFields": sum(row[col] or 0 for col in pending_cols)
         }
 
 
