@@ -765,8 +765,8 @@ class MCRPipeline:
 
             data_per_year[dod] = data_per_year.get(dod, 0) + 1
 
-        ods = self.ods_assignment.get(fin, np.nan)
-        source = self.source_map.get(fin, np.nan)
+        ods = self.ods_assignment.get(webplus_finno, np.nan)
+        source = self.source_map.get(webplus_finno, np.nan)
 
         # CRS import / importedCases (best effort)
         imported_cases = 0
@@ -777,7 +777,7 @@ class MCRPipeline:
 
         row: Dict[str, Any] = {
             "Electronic_File": bundle_id,
-            "FIN_NUMBER": fin,
+            "FIN_NUMBER": webplus_finno,
             "Total_Counted_Cases": len(patients),
             "Total_Tumor_Count": tumor_count,          
             "Total_Imported_Cases": imported_cases,   
